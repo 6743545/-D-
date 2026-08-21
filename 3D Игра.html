@@ -1,0 +1,249 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Летай, строй, круши!</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; cursor: crosshair; user-select: none; }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; font-family: Arial, sans-serif; font-size: 16px; pointer-events: none; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <b>Управление:</b><br>
+        W / S — вперёд / назад<br>
+        A / D — стрейф (влево/вправо)<br>
+        Стрелки — поворот камеры<br>
+        Пробел — поставить блок (на высоте игрока)<br>
+        ПКМ — удалить блок (с эффектом разрушения!)<br>
+        F — ВКЛ/ВЫКЛ ПОЛЁТ<br>
+        Q / E — вверх / вниз (в полёте)<br>
+        Esc — выйти
+    </div>
+    
+    <canvas id="glCanvas"></canvas>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        var scene, camera, renderer;
+        var cubes = []; // обычные блоки
+        var fragments = []; // осколки от разрушений
+        var camX = 0, camY = 5, camZ = 10;
+        var yaw = 0, pitch = 0;
+        var moveSpeed = 0.25;
+        var rotateSpeed = 0.03;
+        var keys = {};
+        var isFlying = false;
+        
+        var raycaster = new THREE.Raycaster();
+        var mouse = new THREE.Vector2();
+        var canvas = document.getElementById('glCanvas');
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+
+            var ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            var dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(5, 20, 7);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // Сетка побольше
+            var gridHelper = new THREE.GridHelper(40, 40, 0x00ff00, 0x444444);
+            gridHelper.position.y = 0;
+            scene.add(gridHelper);
+
+            // Платформа внизу
+            var platformGeo = new THREE.BoxGeometry(30, 1, 30);
+            var platformMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            var platform = new THREE.Mesh(platformGeo, platformMat);
+            platform.position.y = -0.5;
+            platform.castShadow = true;
+            platform.receiveShadow = true;
+            scene.add(platform);
+
+            // Стартовые блоки на платформе
+            for (var i = 0; i < 7; i++) {
+                createCubeAt((i - 3) * 2, 0.5, 0);
+            }
+
+            window.addEventListener('keydown', onKeyDown, false);
+            window.addEventListener('keyup', onKeyUp, false);
+            window.addEventListener('resize', onWindowResize, false);
+            window.addEventListener('mousedown', onMouseClick, false);
+            window.addEventListener('contextmenu', function(e) { e.preventDefault(); }, false);
+
+            animate();
+        }
+
+        function onKeyDown(event) {
+            keys[event.code] = true;
+
+            if (event.code === 'Space') createCube();
+            if (event.code === 'KeyF') isFlying = !isFlying;
+            if (event.code === 'Escape') window.close();
+        }
+
+        function onKeyUp(event) {
+            keys[event.code] = false;
+        }
+
+        function onMouseClick(event) {
+            var rect = canvas.getBoundingClientRect();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            if (event.button === 2) { // ПКМ — удаление с разрушением
+                var intersects = raycaster.intersectObjects(cubes);
+                if (intersects.length > 0) {
+                    var cube = intersects[0].object;
+                    explodeCube(cube); // вызываем эффект разрушения
+                    
+                    scene.remove(cube);
+                    var index = cubes.indexOf(cube);
+                    if (index > -1) cubes.splice(index, 1);
+                }
+            }
+        }
+
+        // Функция, которая делает «взрыв» блока
+        function explodeCube(cube) {
+            var pos = cube.position;
+            var color = cube.material.color;
+
+            // Создаём 12–15 осколков
+            for (var i = 0; i < 15; i++) {
+                var geo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+                var mat = new THREE.MeshStandardMaterial({ color: color });
+                var frag = new THREE.Mesh(geo, mat);
+
+                // Ставим осколок в центр разрушенного блока
+                frag.position.copy(pos);
+
+                // Добавляем случайный вектор разлёта
+                var spread = 2.5; // насколько сильно разлетаются
+                var vx = (Math.random() - 0.5) * spread;
+                var vy = (Math.random()) * spread + 0.5; // всегда немного вверх
+                var vz = (Math.random() - 0.5) * spread;
+
+                frag.userData = {
+                    velocity: new THREE.Vector3(vx, vy, vz),
+                    gravity: 0.15, // сила притяжения осколков
+                    life: 1.0      // «жизнь» осколка (чтобы потом удалить)
+                };
+
+                scene.add(frag);
+                fragments.push(frag);
+            }
+        }
+
+        function updateCamera() {
+            if (keys['ArrowRight']) yaw -= rotateSpeed;
+            if (keys['ArrowLeft']) yaw += rotateSpeed;
+            if (keys['ArrowUp']) pitch -= rotateSpeed;
+            if (keys['ArrowDown']) pitch += rotateSpeed;
+
+            var dx = Math.sin(yaw);
+            var dz = -Math.cos(yaw);
+
+            if (isFlying) {
+                if (keys['KeyW']) { camX += dx * moveSpeed; camZ += dz * moveSpeed; }
+                if (keys['KeyS']) { camX -= dx * moveSpeed; camZ -= dz * moveSpeed; }
+                if (keys['KeyA']) { camX += dz * moveSpeed; camZ -= dx * moveSpeed; }
+                if (keys['KeyD']) { camX -= dz * moveSpeed; camZ += dx * moveSpeed; }
+                if (keys['KeyQ']) camY += moveSpeed;
+                if (keys['KeyE']) camY -= moveSpeed;
+            } else {
+                if (keys['KeyW']) { camX += dx * moveSpeed; camZ += dz * moveSpeed; }
+                if (keys['KeyS']) { camX -= dx * moveSpeed; camZ -= dz * moveSpeed; }
+                if (keys['KeyA']) { camX += dz * moveSpeed; camZ -= dx * moveSpeed; }
+                if (keys['KeyD']) { camX -= dz * moveSpeed; camZ += dx * moveSpeed; }
+                camY = 5;
+            }
+
+            camera.position.set(camX, camY, camZ);
+            camera.rotation.y = yaw;
+            camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+        }
+
+        function updateFragments() {
+            for (var i = fragments.length - 1; i >= 0; i--) {
+                var f = fragments[i];
+                var data = f.userData;
+
+                // Двигаем осколок по его скорости
+                f.position.addScaledVector(data.velocity, 1.0);
+
+                // Применяем гравитацию (осколки падают)
+                data.velocity.y -= data.gravity;
+
+                // Уменьшаем «жизнь» — чтобы потом убрать совсем
+                data.life -= 0.02;
+
+                if (data.life <= 0 || f.position.y < -10) {
+                    scene.remove(f);
+                    fragments.splice(i, 1);
+                }
+            }
+        }
+
+        function createCube() {
+            var geometry = new THREE.BoxGeometry(1, 1, 1);
+            var color = Math.floor(Math.random() * 0xffffff);
+            var material = new THREE.MeshStandardMaterial({ color: color, emissive: 0x111111 });
+            var cube = new THREE.Mesh(geometry, material);
+
+            var dx = Math.sin(yaw);
+            var dz = -Math.cos(yaw);
+            var targetX = Math.round(camX + dx * 2);
+            var targetZ = Math.round(camZ + dz * 2);
+
+            cube.position.set(targetX, camY, targetZ);
+
+            cube.castShadow = true;
+            cube.receiveShadow = true;
+            
+            scene.add(cube);
+            cubes.push(cube);
+        }
+
+        function createCubeAt(x, y, z) {
+            var geometry = new THREE.BoxGeometry(1, 1, 1);
+            var material = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+            var cube = new THREE.Mesh(geometry, material);
+            cube.position.set(x, y, z);
+            cube.castShadow = true;
+            cube.receiveShadow = true;
+            scene.add(cube);
+            cubes.push(cube);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updateCamera();
+            updateFragments(); // обновляем осколки
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        init();
+    </script>
+</body>
+</html>
